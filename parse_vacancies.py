@@ -2,9 +2,20 @@ from bs4 import BeautifulSoup
 import codecs
 import json
 import pandas as pd
+import re
+import csv
+
+def clear_string(s):
+    s = re.sub('["«»;?!,():]', '', s)
+    s = re.sub('[-/—]', ' ', s)
+    s = re.sub(r"\\", ' ', s)
+    s = re.sub('  ', ' ', s)
+    s = s.lower()
+    return s
 
 def parse_html(vacancy_id, html_doc):
     MIN_BEGINNING_PART = 3
+    MAX_TEXT_LEN = 1000
     soup = BeautifulSoup(html_doc, 'html.parser')
 
     # process beginning part before <strong>
@@ -30,7 +41,7 @@ def parse_html(vacancy_id, html_doc):
         informal_part.reverse()
         result = []
         for paragraph in informal_part:
-            result.append([vacancy_id, 0, '', paragraph])
+            result.append([vacancy_id, 0, '', clear_string(paragraph)])
     except Exception as e:
         pass
 
@@ -41,6 +52,7 @@ def parse_html(vacancy_id, html_doc):
             title = ul.find_previous_sibling('p').text
             if title[-1] == ':':
                 title = title[:-1]
+            title = title[:min(len(title), MAX_TEXT_LEN)]
             items = [] 
             for li in ul.find_all('li'):
                 s = li.text.strip().replace('\n', '').replace('\r', '')
@@ -51,15 +63,16 @@ def parse_html(vacancy_id, html_doc):
                         continue
                     t += char
                     space = (char == ' ')
+                t = t[:min(len(t), MAX_TEXT_LEN)]
                 items.append(t)
 
             for i in items:
-                result.append([vacancy_id, ptr, title, i])
+                result.append([vacancy_id, ptr, clear_string(title), clear_string(i)])
             ptr += 1
         except Exception as e:
             pass
-    
     return result
+
 if __name__ == '__main__':
     with codecs.open('vacancies.json', 'r', encoding='utf8') as f:
         vacancies = json.load(f)
@@ -86,4 +99,4 @@ if __name__ == '__main__':
     print('Too many requests err: {}'.format(err_to_many_requests))
     print('No tag err: {}'.format(err_no_tag))
     df = pd.DataFrame(result, columns=['vacancy_id', 'section_id', 'section_title', 'section_body'])
-    df.to_csv('vacancies_parsed.csv', index=False)
+    df.to_csv('vacancies_parsed_cleared.csv', index=False, quoting=csv.QUOTE_NONE, escapechar='')
