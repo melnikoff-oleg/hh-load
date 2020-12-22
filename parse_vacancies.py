@@ -4,18 +4,61 @@ import json
 import pandas as pd
 import re
 import csv
+import stanza
+import nltk
+from nltk.corpus import stopwords
+from string import punctuation
 
+#text cleaning
 def clear_string(s):
-    s = re.sub('["«»;?!,():]', '', s)
-    s = re.sub('[-/—]', ' ', s)
+    s = s.strip().replace('\n', '').replace('\r', '')
+    s = re.sub('["«»;?!,()]', '', s)
+    s = re.sub('[/—-]', ' ', s)
     s = re.sub(r"\\", ' ', s)
     s = re.sub('  ', ' ', s)
-    s = s.lower()
+    rus_alphavite = 'АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ'
+    for c in rus_alphavite:
+        s = s.replace(c, c.lower())
     return s
 
+def del_stopwords(doc):
+    r = doc.copy()
+    cur = 0
+    for ind, i in enumerate(doc):
+        if i['lemma'] in russian_stopwords or i['lemma'] in punctuation:
+            r.pop(ind - cur)
+            cur += 1
+    return r
+
+def doc_to_list(doc):
+    doc_json = json.loads(str(doc))
+    return doc_json[0]
+
+def process_doc(doc):
+    doc = doc_to_list(doc)
+    doc = del_stopwords(doc)
+    return doc
+
+def get_lemms(doc):
+    ans = []
+    for i in doc:
+        ans.append(i['lemma'])
+    return ans
+
+def check_eng(html_doc):
+    a = re.search('[а-яА-Я]', html_doc)
+    if a is None:
+        return True
+    return False
+
+
+# main html processing func, parse vacancy on simple sections
 def parse_html(vacancy_id, html_doc):
-    MIN_BEGINNING_PART = 3
-    MAX_TEXT_LEN = 1000
+    if check_eng(html_doc):
+        print("This vacancy is English")
+        return []
+    MAX_TITLE_LEN = 5
+    MAX_BODY_LEN = 10
     soup = BeautifulSoup(html_doc, 'html.parser')
 
     # process beginning part before <strong>
@@ -28,20 +71,22 @@ def parse_html(vacancy_id, html_doc):
         first_strong = first_ul.find_previous_sibling('strong')
     informal_part = []
     current_p = first_strong
+    result = []
     try:
-        while current_p is not None and current_p.find_previous_sibling('p') is not None:
-            next_p = current_p.find_previous_sibling('p')
-            words = next_p.text.split(' ')
-            length = min(MIN_BEGINNING_PART, len(words))
-            s = ' '.join(words[: length])
-            if length < len(words):
-                s += '...'
-            informal_part.append(s)
+        while current_p is not None and current_p.find_previous_sibling() is not None:
+            next_p = current_p.find_previous_sibling()
+
+            text = clear_string(next_p.text)
+            if len(text) == 0:
+                break
+            words = get_lemms(process_doc(nlp(text)))
+            length = min(MAX_BODY_LEN, len(words))
+            body = ' '.join(words[: length])
+            informal_part.append(body)
             current_p = next_p
         informal_part.reverse()
-        result = []
         for paragraph in informal_part:
-            result.append([vacancy_id, 0, '', clear_string(paragraph)])
+            result.append([vacancy_id, 0, '', paragraph])
     except Exception as e:
         pass
 
@@ -49,41 +94,43 @@ def parse_html(vacancy_id, html_doc):
     ptr = 1 if len(result) > 0 else 0
     for ul in soup.find_all('ul'):
         try:
-            title = ul.find_previous_sibling('p').text
-            if title[-1] == ':':
-                title = title[:-1]
-            title = title[:min(len(title), MAX_TEXT_LEN)]
+            text = clear_string(ul.find_previous_sibling().text)
+            words = get_lemms(process_doc(nlp(text)))
+            length = min(MAX_TITLE_LEN, len(words))
+            title = words[:length]
+            title = ' '.join(title)
             items = [] 
             for li in ul.find_all('li'):
-                s = li.text.strip().replace('\n', '').replace('\r', '')
-                t = ''
-                space = False
-                for char in s:
-                    if char == ' ' and space:
-                        continue
-                    t += char
-                    space = (char == ' ')
-                t = t[:min(len(t), MAX_TEXT_LEN)]
-                items.append(t)
+                s = clear_string(li.text)
+                
+                words = get_lemms(process_doc(nlp(s)))
+                length = min(MAX_BODY_LEN, len(words))
+                body = words[:length]
+                body = ' '.join(body)
+                items.append(body)
 
             for i in items:
-                result.append([vacancy_id, ptr, clear_string(title), clear_string(i)])
+                result.append([vacancy_id, ptr, title, i])
             ptr += 1
         except Exception as e:
             pass
     return result
 
 if __name__ == '__main__':
+    nltk.download("stopwords")
+    russian_stopwords = stopwords.words("russian")
+    nlp = stanza.Pipeline(lang='ru', processors='tokenize,pos,lemma')
     with codecs.open('vacancies.json', 'r', encoding='utf8') as f:
         vacancies = json.load(f)
         success = 0
         err_to_many_requests = 0
         err_no_tag = 0
         result = []
-        bunch_size = 5000
+        bunch_size = 300
         lenght = min(bunch_size, len(vacancies))
-        for vacancy in vacancies[: lenght]:
+        for ind, vacancy in enumerate(vacancies[: lenght]):
             try:
+                print('{}/{}'.format(ind + 1, lenght))
                 vacancy_id = vacancy['id']
                 html_doc = vacancy['description']
                 result += parse_html(vacancy_id, html_doc)
@@ -92,6 +139,8 @@ if __name__ == '__main__':
                 if str(e)[1: -1] == 'id':
                     err_to_many_requests += 1
                 else:
+                    print(e)
+                    print(ind + 1)
                     err_no_tag += 1
                 pass
 
@@ -99,4 +148,4 @@ if __name__ == '__main__':
     print('Too many requests err: {}'.format(err_to_many_requests))
     print('No tag err: {}'.format(err_no_tag))
     df = pd.DataFrame(result, columns=['vacancy_id', 'section_id', 'section_title', 'section_body'])
-    df.to_csv('vacancies_parsed_cleared.csv', index=False, quoting=csv.QUOTE_NONE, escapechar='')
+    df.to_csv('vacancies_parsed.csv', index=False, quoting=csv.QUOTE_NONE, escapechar=';')
